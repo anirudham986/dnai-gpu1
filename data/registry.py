@@ -30,6 +30,28 @@ DATASET_REGISTRY = {
         'pathogenic_file_idx': 0,   # Index of the pathogenic file in 'files'
         'benign_file_idx': 1,       # Index of the benign file in 'files'
     },
+    'consolidated': {
+        'description': (
+            'All 4 sources merged, deduplicated, label-conflict-resolved, '
+            '5-fold stratified — 0 leakage guaranteed'
+        ),
+        'files': ['05_consolidated_balanced.csv'],
+        'strategy': 'kfold',       # Split by FOLD_ID column, no random sampling
+        'label_column': 'INT_LABEL',
+        'has_both_classes': True,
+        'fold_id_column': 'FOLD_ID',
+        'n_folds': 5,
+    },
+    'consolidated_full': {
+        'description': (
+            'Full 100k consolidated training + 25k unseen holdout test — '
+            'for final model (pre-compression). Zero leakage guaranteed.'
+        ),
+        'files': ['05_consolidated_balanced.csv', '06_holdout_25k_unseen.csv'],
+        'strategy': 'full_train',   # All 100k for train, 25k holdout for test
+        'label_column': 'INT_LABEL',
+        'has_both_classes': True,
+    },
 }
 
 
@@ -38,7 +60,7 @@ def get_dataset_info(dataset_name: str) -> dict:
     Retrieve the registry entry for a dataset.
 
     Args:
-        dataset_name: One of 'clinvar', 'dbsnp', 'cbioportal'
+        dataset_name: One of 'clinvar', 'dbsnp', 'cbioportal', 'consolidated'
 
     Returns:
         Registry dictionary with file paths, strategy, etc.
