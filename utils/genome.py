@@ -99,9 +99,13 @@ def _find_hg38() -> str:
 
 
 def _download_hg38() -> str:
-    """Download hg38.fa.gz from UCSC and decompress."""
-    import urllib.request
-    import gzip
+    """
+    Download hg38.fa.gz from UCSC and decompress.
+
+    Tries wget first (best for large files — retries, resume support),
+    then curl, then falls back to Python urllib as last resort.
+    """
+    import subprocess
     import shutil
 
     # Use current working directory for download
@@ -111,6 +115,32 @@ def _download_hg38() -> str:
     gz_path = os.path.join(download_dir, 'hg38.fa.gz')
     fa_path = os.path.join(download_dir, 'hg38.fa')
     url = "https://hgdownload.soe.ucsc.edu/goldenPath/hg38/bigZips/hg38.fa.gz"
+
+    # --- Try wget (best for HPC — has retry + resume) ---
+    if shutil.which('wget'):
+        print("   Using wget (with retry + resume support)...")
+        ret = subprocess.run(
+            ['wget', '-c', '--tries=5', '--timeout=60',
+             '-O', gz_path, url],
+            check=False,
+        )
+        if ret.returncode == 0 and os.path.exists(gz_path):
+            return _decompress_and_return(gz_path, fa_path)
+
+    # --- Try curl (common fallback) ---
+    if shutil.which('curl'):
+        print("   Using curl...")
+        ret = subprocess.run(
+            ['curl', '-L', '-C', '-', '--retry', '5',
+             '-o', gz_path, url],
+            check=False,
+        )
+        if ret.returncode == 0 and os.path.exists(gz_path):
+            return _decompress_and_return(gz_path, fa_path)
+
+    # --- Last resort: Python urllib ---
+    print("   Using Python urllib (no resume support)...")
+    import urllib.request
 
     def _progress(count, block_size, total_size):
         if count % 500 == 0:
@@ -122,8 +152,15 @@ def _download_hg38() -> str:
 
     urllib.request.urlretrieve(url, gz_path, reporthook=_progress)
     print()
+    return _decompress_and_return(gz_path, fa_path)
 
-    print("   Decompressing...")
+
+def _decompress_and_return(gz_path: str, fa_path: str) -> str:
+    """Decompress .gz and return the .fa path."""
+    import gzip
+    import shutil
+
+    print("   Decompressing (this may take a few minutes)...")
     with gzip.open(gz_path, 'rb') as f_in:
         with open(fa_path, 'wb') as f_out:
             shutil.copyfileobj(f_in, f_out)
