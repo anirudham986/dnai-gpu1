@@ -4,6 +4,7 @@
 # here so nothing is hard-coded elsewhere.
 # =====================================================================
 
+import os
 from copy import deepcopy
 
 # ---------------------------------------------------------------------
@@ -22,8 +23,8 @@ BASE_CFG = {
 
     # Training — full fine-tuning with differential LR
     'epochs': 20,
-    'batch_size': 16,
-    'grad_accum_steps': 4,             # Effective batch = 64
+    'batch_size': 32,                  # Per-GPU batch (32GB VRAM)
+    'grad_accum_steps': 4,             # Effective batch = 128
     'backbone_lr': 5e-6,              # Very low — preserve pre-training
     'head_lr': 5e-4,                  # Higher — learn task fast
     'weight_decay': 0.01,
@@ -36,13 +37,16 @@ BASE_CFG = {
     'patience': 4,                     # Early stopping patience (epochs)
     'seed': 42,
 
-    # Checkpoint behaviour
-    'checkpoint_interval_hours': 8.5,  # Save timed checkpoint every 8.5 hrs
-    'save_every_n_epochs': 2,          # Also save every N epochs
+    # Logging
+    'log_every_n_steps': 50,           # Print detailed batch stats every N steps
+    'verbose': True,                   # Enable detailed per-batch logging
 
-    # Paths (Kaggle default, overridable via CLI)
-    'save_dir': '/kaggle/working/ntv2_trained',
-    'num_workers': 2,
+    # Performance
+    'cudnn_benchmark': True,           # Faster on fixed-size inputs
+    'num_workers': 4,                  # DataLoader workers
+
+    # Paths (relative — works on any machine)
+    'save_dir': os.path.join('.', 'output', 'ntv2_trained'),
 }
 
 # Human-readable dataset choices for the interactive prompt
@@ -87,17 +91,11 @@ DATASET_OVERRIDES = {
         'max_per_class': 50_000,     # Per-class cap (handled by build script)
         'val_fold': 0,               # Default validation fold (override with --fold)
         'n_folds': 5,
-        'patience': 3,               # Tight early stopping for Kaggle commit sessions
-        'checkpoint_interval_hours': 8.5,
-        'save_every_n_epochs': 2,
     },
     'consolidated_full': {
         # Full 100k training + 25k unseen holdout test
         # Used AFTER K-fold validation to produce the final compression-ready model
         'max_per_class': 50_000,
-        'patience': 4,               # Slightly more patience for full training
-        'checkpoint_interval_hours': 8.5,
-        'save_every_n_epochs': 2,
     },
 }
 
@@ -124,7 +122,7 @@ def get_config(dataset_name: str, val_fold: int = None) -> dict:
     cfg = deepcopy(BASE_CFG)
     cfg.update(DATASET_OVERRIDES[dataset_name])
     cfg['dataset_name'] = dataset_name
-    cfg['save_dir']     = f"/kaggle/working/ntv2_{dataset_name}_trained"
+    cfg['save_dir'] = os.path.join('.', 'output', f'ntv2_{dataset_name}_trained')
 
     # Apply val_fold override
     if val_fold is not None:
