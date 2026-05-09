@@ -399,8 +399,8 @@ COMPRESSION_CFG = {
     'model_name': MODEL_NAME,
     'seq_length': 1000,
     'max_per_class': 50_000,
-    'batch_size': 32,
-    'num_workers': 4,
+    'batch_size': 8,            # ← 8 (was 32); keeps peak VRAM manageable
+    'num_workers': 2,            # ← 2 (was 4); each worker forks ~14 GB process
     'seed': 42,
 
     # EMA warmup
@@ -420,7 +420,7 @@ COMPRESSION_CFG = {
     'lth_weight_decay': 0.01,
     'lth_warmup_fraction': 0.12,
     'lth_patience': 5,             # AUROC-based early stopping
-    'lth_grad_accum': 2,
+    'lth_grad_accum': 8,        # ← 8 (was 2); effective batch = 8×8 = 64, same as before
     'lth_max_grad_norm': 1.0,
     'focal_gamma': 2.0,
     'label_smoothing': 0.08,

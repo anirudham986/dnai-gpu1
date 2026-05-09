@@ -51,6 +51,14 @@ DENSE_MODEL_PATH = (
 # =============================================================================
 
 # ── 0. Dependency check/install ──────────────────────────────────────────────
+# Set PYTORCH_CUDA_ALLOC_CONF FIRST — before any torch/CUDA init — so that
+# PyTorch uses the expandable-segments allocator which avoids fragmentation OOM.
+import os
+os.environ.setdefault(
+    'PYTORCH_CUDA_ALLOC_CONF',
+    'expandable_segments:True,max_split_size_mb:256'
+)
+
 import subprocess, sys
 
 def _ensure(pkg, import_name=None):
@@ -67,7 +75,6 @@ _ensure('scikit-learn', 'sklearn')
 _ensure('tqdm')
 
 # ── 1. Standard imports ──────────────────────────────────────────────────────
-import os
 import json
 import time
 import datetime

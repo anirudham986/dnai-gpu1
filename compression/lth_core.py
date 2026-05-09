@@ -32,6 +32,61 @@ from compression.shared import evaluate_full
 
 
 # =============================================================================
+# GRADIENT CHECKPOINTING HELPER
+# =============================================================================
+
+def _enable_gradient_checkpointing(model: nn.Module):
+    """
+    Enable gradient checkpointing on the NTv2 backbone to trade compute
+    for memory: activations are NOT stored during the forward pass and are
+    instead recomputed during backward, roughly halving activation VRAM.
+
+    Tries multiple strategies in priority order to handle different
+    versions of the HuggingFace ESM implementation:
+      1. model.backbone.encoder.gradient_checkpointing = True
+         (direct flag used by modeling_esm.py in the forward loop)
+      2. model.backbone.gradient_checkpointing_enable()
+         (standard HF PreTrainedModel API)
+      3. model.backbone.config.gradient_checkpointing = True
+         (config-based flag for older HF versions)
+    """
+    backbone = getattr(model, 'backbone', None)
+    if backbone is None:
+        return
+
+    enabled = False
+
+    # Strategy 1: direct encoder flag (fastest — matches modeling_esm.py)
+    encoder = getattr(backbone, 'encoder', None)
+    if encoder is not None and hasattr(encoder, 'gradient_checkpointing'):
+        encoder.gradient_checkpointing = True
+        enabled = True
+
+    # Strategy 2: standard HF API
+    if not enabled and hasattr(backbone, 'gradient_checkpointing_enable'):
+        try:
+            backbone.gradient_checkpointing_enable()
+            enabled = True
+        except Exception:
+            pass
+
+    # Strategy 3: config flag
+    if not enabled and hasattr(backbone, 'config'):
+        try:
+            backbone.config.gradient_checkpointing = True
+            enabled = True
+        except Exception:
+            pass
+
+    if enabled:
+        print("   ✅ Gradient checkpointing enabled on backbone "
+              "(activation memory ~50% lower)")
+    else:
+        print("   ⚠️  Could not enable gradient checkpointing — "
+              "proceeding without it (OOM risk)")
+
+
+# =============================================================================
 # 1. EMA GRADIENT TRACKER
 # =============================================================================
 
@@ -365,6 +420,10 @@ def lth_finetune(
     use_amp = device.type == 'cuda'
     scaler = GradScaler('cuda') if use_amp else None
 
+    # ── Gradient checkpointing: recompute activations during backward
+    #    instead of storing them — halves activation memory with ~15% compute cost.
+    _enable_gradient_checkpointing(model)
+
     optimizer = optim.AdamW(
         model.get_param_groups(cfg['lth_backbone_lr'], cfg['lth_head_lr']),
         weight_decay=cfg['lth_weight_decay'],
@@ -389,6 +448,9 @@ def lth_finetune(
     swa_start_ep = max(0, int(n_epochs * cfg['swa_start_fraction']))
     swa_state = None
     swa_count = 0
+
+    if device.type == 'cuda':
+        torch.cuda.empty_cache()
 
     print(f"\n   Fine-tuning {sparsity_label} | "
           f"{n_epochs} epochs | backbone_lr={cfg['lth_backbone_lr']:.1e} | "
@@ -424,9 +486,14 @@ def lth_finetune(
             # Enforce mask on gradients immediately after backward
             enforce_mask_on_gradients(model, masks, device)
 
-            running_loss += loss.item() * accum
-            correct += (torch.argmax(out, 1) == labs).sum().item()
+            loss_val = loss.item() * accum
+            pred_labels = torch.argmax(out, 1)
+            running_loss += loss_val
+            correct += (pred_labels == labs).sum().item()
             total += labs.size(0)
+
+            # Free GPU tensors that are no longer needed
+            del out, loss, pred_labels, ri, rm, ai, am, labs
 
             is_accum_step = ((step_idx + 1) % accum == 0 or
                              (step_idx + 1) == len(train_loader))
@@ -447,7 +514,7 @@ def lth_finetune(
                 apply_masks(model, masks, device)
 
             pbar.set_postfix(
-                loss=f"{loss.item()*accum:.4f}",
+                loss=f"{loss_val:.4f}",
                 acc=f"{100*correct/max(total,1):.1f}%",
             )
 
@@ -455,32 +522,43 @@ def lth_finetune(
         train_acc = 100 * correct / max(total, 1)
         avg_loss = running_loss / len(train_loader)
 
+        # Free cache before validation (eval uses less memory but benefits from
+        # releasing any fragmented training allocations)
+        if device.type == 'cuda':
+            torch.cuda.empty_cache()
+
         # Validation
         val_m = evaluate_full(model, val_loader, device, use_amp,
                               desc=f"Val Ep{epoch+1}")
+
+        if device.type == 'cuda':
+            torch.cuda.empty_cache()
 
         print(f"   [{sparsity_label}] Ep {epoch+1}: "
               f"Loss={avg_loss:.4f} | TrainAcc={train_acc:.2f}% | "
               f"ValAcc={val_m['accuracy']:.2f}% | AUROC={val_m['auroc']:.2f}% | "
               f"F1={val_m['f1']:.2f}% | {elapsed:.0f}s")
 
-        # ── SWA: accumulate model averages ──────────────────────────────
+        # ── SWA: accumulate model averages (CPU tensors to save VRAM) ──────
         if epoch >= swa_start_ep:
+            # Keep SWA state on CPU to avoid doubling GPU memory usage
+            cpu_state = {k: v.cpu().float() for k, v in model.state_dict().items()}
             if swa_state is None:
-                swa_state = {k: v.clone().float()
-                             for k, v in model.state_dict().items()}
+                swa_state = cpu_state
                 swa_count = 1
             else:
                 swa_count += 1
                 for k in swa_state:
                     swa_state[k].add_(
-                        (model.state_dict()[k].float() - swa_state[k]) / swa_count
+                        (cpu_state[k] - swa_state[k]) / swa_count
                     )
+            del cpu_state
 
         # ── Best tracking ───────────────────────────────────────────────
         if val_m['auroc'] > best_auroc:
             best_auroc = val_m['auroc']
-            best_state = deepcopy(model.state_dict())
+            # Store best state on CPU to avoid holding two GPU copies
+            best_state = {k: v.cpu() for k, v in model.state_dict().items()}
             best_metrics = val_m
             patience_counter = 0
             print(f"   🎯 [{sparsity_label}] NEW BEST AUROC={best_auroc:.4f}% "
@@ -494,32 +572,42 @@ def lth_finetune(
     # ── Apply SWA if it improved things ─────────────────────────────────
     if swa_state is not None and swa_count > 1:
         print(f"   Applying SWA ({swa_count} checkpoints)...")
-        # Cast SWA state back to original dtypes
+        # Cast SWA state (CPU fp32) back to original dtypes, move to GPU
         orig_state = model.state_dict()
         swa_cast = {}
         for k, v in swa_state.items():
-            if k in orig_state:
-                swa_cast[k] = v.to(dtype=orig_state[k].dtype)
-            else:
-                swa_cast[k] = v
+            tgt_dtype = orig_state[k].dtype if k in orig_state else v.dtype
+            swa_cast[k] = v.to(device=device, dtype=tgt_dtype)
+        del swa_state  # free CPU copy
         model.load_state_dict(swa_cast)
+        del swa_cast
+        if device.type == 'cuda':
+            torch.cuda.empty_cache()
         # Re-enforce masks after SWA
         apply_masks(model, masks, device)
         swa_m = evaluate_full(model, val_loader, device, use_amp,
                               desc="SWA Eval")
+        if device.type == 'cuda':
+            torch.cuda.empty_cache()
         print(f"   SWA AUROC={swa_m['auroc']:.4f}%  Best={best_auroc:.4f}%")
         if swa_m['auroc'] > best_auroc:
             best_auroc = swa_m['auroc']
-            best_state = deepcopy(model.state_dict())
+            best_state = {k: v.cpu() for k, v in model.state_dict().items()}
             best_metrics = swa_m
             print(f"   ✅ SWA wins → using SWA weights")
         else:
-            model.load_state_dict(best_state)
+            # Reload best (CPU tensors → GPU)
+            model.load_state_dict(
+                {k: v.to(device) for k, v in best_state.items()})
             apply_masks(model, masks, device)
             print(f"   ↩  Best checkpoint wins → reverting")
     elif best_state:
-        model.load_state_dict(best_state)
+        model.load_state_dict(
+            {k: v.to(device) for k, v in best_state.items()})
         apply_masks(model, masks, device)
+
+    if device.type == 'cuda':
+        torch.cuda.empty_cache()
 
     return best_state, best_metrics
 
@@ -542,6 +630,7 @@ def run_ema_warmup(
     """
     use_amp = device.type == 'cuda'
     scaler = GradScaler('cuda') if use_amp else None
+    _enable_gradient_checkpointing(model)
     optimizer = optim.AdamW(
         model.get_param_groups(cfg['lth_backbone_lr'], cfg['lth_head_lr']),
         weight_decay=cfg['lth_weight_decay'],
@@ -551,6 +640,8 @@ def run_ema_warmup(
 
     n_ep = cfg['ema_warmup_epochs']
     print(f"\n   ── EMA Warmup ({n_ep} epochs) ──")
+    if device.type == 'cuda':
+        torch.cuda.empty_cache()
 
     for ep in range(n_ep):
         model.train()
@@ -586,8 +677,14 @@ def run_ema_warmup(
             else:
                 optimizer.step()
 
+            del out, loss, ri, rm, ai, am, labs
+
+        if device.type == 'cuda':
+            torch.cuda.empty_cache()
         m = evaluate_full(model, val_loader, device, use_amp,
                           desc=f"EMA Warmup Ep{ep+1}")
+        if device.type == 'cuda':
+            torch.cuda.empty_cache()
         print(f"   EMA Warmup Ep {ep+1}: "
               f"AUROC={m['auroc']:.2f}%  Acc={m['accuracy']:.2f}%  "
               f"Steps={ema_tracker.step_count}")
@@ -614,6 +711,7 @@ def run_movement_warmup(
     """
     use_amp = device.type == 'cuda'
     scaler = GradScaler('cuda') if use_amp else None
+    _enable_gradient_checkpointing(model)
     optimizer = optim.AdamW(
         model.get_param_groups(cfg['lth_backbone_lr'], cfg['lth_head_lr']),
         weight_decay=cfg['lth_weight_decay'],
@@ -623,6 +721,8 @@ def run_movement_warmup(
 
     n_ep = cfg['movement_warmup_epochs']
     print(f"\n   ── Movement Warmup ({n_ep} epochs) ──")
+    if device.type == 'cuda':
+        torch.cuda.empty_cache()
 
     for ep in range(n_ep):
         model.train()
@@ -655,8 +755,14 @@ def run_movement_warmup(
             else:
                 optimizer.step()
 
+            del out, loss, ri, rm, ai, am, labs
+
+        if device.type == 'cuda':
+            torch.cuda.empty_cache()
         m = evaluate_full(model, val_loader, device, use_amp,
                           desc=f"Move Warmup Ep{ep+1}")
+        if device.type == 'cuda':
+            torch.cuda.empty_cache()
         print(f"   Move Warmup Ep {ep+1}: "
               f"AUROC={m['auroc']:.2f}%  Acc={m['accuracy']:.2f}%")
 
