@@ -212,97 +212,38 @@ def main():
         os.makedirs(d, exist_ok=True)
 
     # =========================================================================
-    # STEP 3: MAGNITUDE SCORER
+    # STEPS 3–5: LOAD COMPLETED SCORER RESULTS FROM DISK
+    # (Magnitude, EMA, Fisher already completed — loading saved JSON)
     # =========================================================================
+
+    def _load_saved_results(scorer_name, out_dir):
+        """Load a completed scorer's results JSON and convert back to
+        {sparsity_float: metrics_dict} format."""
+        json_path = os.path.join(out_dir, f'{scorer_name}_results.json')
+        print(f"\n  📂 Loading saved {scorer_name} results from {json_path}")
+        with open(json_path, 'r') as f:
+            saved = json.load(f)
+        results = {}
+        for key, metrics in saved['sparsity_results'].items():
+            # key is like "10pct", "20pct", etc.
+            sp_float = int(key.replace('pct', '')) / 100.0
+            results[sp_float] = metrics
+        print(f"     Loaded {len(results)} sparsity levels: "
+              f"{[f'{s*100:.0f}%' for s in sorted(results.keys())]}")
+        return results
+
     print(f"\n{'═'*78}")
-    print(f"  STEP 3 / 7: MAGNITUDE SCORER")
+    print(f"  STEPS 3–5: LOADING COMPLETED RESULTS (magnitude, ema, fisher)")
     print(f"{'═'*78}")
-    t3 = time.time()
 
-    results_magnitude = scorer_magnitude.run(
-        train_loader=train_loader,
-        val_loader=val_loader,
-        device=device,
-        dense_path=dense_path,
-        out_dir=scorer_dirs['magnitude'],
-        sparsities=SPARSITIES,
-        cfg=PIPELINE_CFG,
-        baseline_metrics=baseline_metrics,
-    )
-
-    torch.cuda.empty_cache() if device.type == 'cuda' else None
-    print(f"\n  ✅ Magnitude scorer complete ({(time.time()-t3)/3600:.2f}h)")
-
-    # ── Print magnitude results before moving on ──────────────────────────────
-    print(f"\n{'━'*78}")
-    print(f"  ▶ MAGNITUDE SCORER — FINAL RESULTS (printed before next scorer starts)")
-    print(f"{'━'*78}")
+    results_magnitude = _load_saved_results('magnitude', scorer_dirs['magnitude'])
     print_sparsity_table('magnitude', results_magnitude, baseline_metrics)
-    for sp in SPARSITIES:
-        m = results_magnitude.get(sp, {})
-        print_metrics_block(m, label=f"Magnitude @ {sp*100:.0f}%", indent="  ")
 
-    # =========================================================================
-    # STEP 4: EMA SCORER
-    # =========================================================================
-    print(f"\n{'═'*78}")
-    print(f"  STEP 4 / 7: EMA GRADIENT SCORER")
-    print(f"{'═'*78}")
-    t4 = time.time()
-
-    results_ema = scorer_ema.run(
-        train_loader=train_loader,
-        val_loader=val_loader,
-        device=device,
-        dense_path=dense_path,
-        out_dir=scorer_dirs['ema'],
-        sparsities=SPARSITIES,
-        cfg=PIPELINE_CFG,
-        baseline_metrics=baseline_metrics,
-    )
-
-    torch.cuda.empty_cache() if device.type == 'cuda' else None
-    print(f"\n  ✅ EMA scorer complete ({(time.time()-t4)/3600:.2f}h)")
-
-    # ── Print EMA results ─────────────────────────────────────────────────────
-    print(f"\n{'━'*78}")
-    print(f"  ▶ EMA SCORER — FINAL RESULTS (printed before next scorer starts)")
-    print(f"{'━'*78}")
+    results_ema = _load_saved_results('ema', scorer_dirs['ema'])
     print_sparsity_table('ema', results_ema, baseline_metrics)
-    for sp in SPARSITIES:
-        m = results_ema.get(sp, {})
-        print_metrics_block(m, label=f"EMA @ {sp*100:.0f}%", indent="  ")
 
-    # =========================================================================
-    # STEP 5: FISHER SCORER
-    # =========================================================================
-    print(f"\n{'═'*78}")
-    print(f"  STEP 5 / 7: FISHER INFORMATION SCORER")
-    print(f"{'═'*78}")
-    t5 = time.time()
-
-    results_fisher = scorer_fisher.run(
-        train_loader=train_loader,
-        val_loader=val_loader,
-        device=device,
-        dense_path=dense_path,
-        out_dir=scorer_dirs['fisher'],
-        sparsities=SPARSITIES,
-        cfg=PIPELINE_CFG,
-        baseline_metrics=baseline_metrics,
-    )
-
-    torch.cuda.empty_cache() if device.type == 'cuda' else None
-    print(f"\n  ✅ Fisher scorer complete ({(time.time()-t5)/3600:.2f}h)")
-
-    # ── Print Fisher results ──────────────────────────────────────────────────
-    print(f"\n{'━'*78}")
-    print(f"  ▶ FISHER SCORER — FINAL RESULTS (printed before next scorer starts)")
-    print(f"{'━'*78}")
+    results_fisher = _load_saved_results('fisher', scorer_dirs['fisher'])
     print_sparsity_table('fisher', results_fisher, baseline_metrics)
-    for sp in SPARSITIES:
-        m = results_fisher.get(sp, {})
-        print_metrics_block(m, label=f"Fisher @ {sp*100:.0f}%", indent="  ")
 
     # =========================================================================
     # STEP 6: MOVEMENT SCORER
